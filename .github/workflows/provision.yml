@@ -1,29 +1,15 @@
 name: Provision Always Free A1
 
 on:
-  schedule:
-    - cron: '17 * * * *'
   workflow_dispatch:
-    inputs:
-      retry_minutes:
-        description: Retry window in minutes; use 2 for a live smoke test
-        type: choice
-        options:
-          - '60'
-          - '2'
-        default: '60'
 
 permissions:
   contents: read
 
-concurrency:
-  group: oci-always-free-a1
-  cancel-in-progress: false
-
 jobs:
   provision:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 360
     permissions:
       contents: read
       issues: write
@@ -40,7 +26,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Run unit and SDK integration tests
         run: python -m unittest discover -v
-      - name: Retry provisioning once per minute for one hour
+      - name: Attempt provisioning 60 times at one-minute intervals
         id: provision
         env:
           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
@@ -56,8 +42,7 @@ jobs:
           OCI_HOME_REGION: ${{ vars.OCI_HOME_REGION }}
           OCI_INSTANCE_NAME: ubuntu-a1
           PYTHONUNBUFFERED: '1'
-          RETRY_MINUTES: ${{ inputs.retry_minutes || '60' }}
-        run: python provision.py --window-seconds "$((RETRY_MINUTES * 60))"
+        run: python provision.py
       - name: Save the provisioning result
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -79,6 +64,12 @@ jobs:
               --body "@${GITHUB_REPOSITORY_OWNER} The Ubuntu A1 instance is RUNNING with 2 OCPU, 12 GB RAM, a 50 GB boot volume, a 100 GB attached data volume, and a reserved IPv4. The CPU/memory controller is included in cloud-init; its guest-level health still needs verification. The data volume still needs filesystem initialization and mounting. Cloudflare management access is a separate step. See the provisioning-result artifact: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           fi
       - name: Stop the schedule after success
+        if: steps.provision.outputs.ready == 'true'
+        env:
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+          CRONJOB_JOB_ID: ${{ secrets.CRONJOB_JOB_ID }}
+        run: python scheduler.py
+      - name: Disable the completed provisioning workflow
         if: steps.provision.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ github.token }}

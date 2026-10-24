@@ -85,6 +85,7 @@ class Result:
     instance_id: str | None = None
     volume_id: str | None = None
     public_ip: str | None = None
+    attempts: int = 0
 
 
 def provision_once(backend, cfg: Config) -> Result:
@@ -140,26 +141,23 @@ def provision_once(backend, cfg: Config) -> Result:
     return Result(True, "Instance RUNNING with 150 GB allocated and a reserved IPv4", instance["id"], volume["id"], public_ip["address"])
 
 
-def run_retry_loop(attempt, *, window_seconds=3600, retry_seconds=60, clock=time.monotonic, sleep=time.sleep, log=print):
-    if window_seconds <= 0 or retry_seconds < 60:
-        raise ValueError("The retry window must be positive and retries must be at least 60 seconds apart")
-    deadline = clock() + window_seconds
-    result = Result(False, "No host capacity during this retry window")
-    number = 0
-    while clock() < deadline:
+def run_retry_loop(attempt, *, max_attempts=60, retry_seconds=60, clock=time.monotonic, sleep=time.sleep, log=print):
+    if not isinstance(max_attempts, int) or max_attempts <= 0 or retry_seconds < 60:
+        raise ValueError("The attempt budget must be positive and retries must be at least 60 seconds apart")
+    result = Result(False, "No attempts completed")
+    for number in range(1, max_attempts + 1):
         started = clock()
-        number += 1
         try:
-            result = attempt()
-            log(json.dumps({"attempt": number, "ready": result.ready, "message": result.message}, sort_keys=True))
-            if result.ready:
-                return result
+            result = dataclasses.replace(attempt(), attempts=number)
         except RetryableError as exc:
-            log(json.dumps({"attempt": number, "ready": False, "message": str(exc)}, sort_keys=True))
-        delay = min(deadline - clock(), max(0, started + retry_seconds - clock()))
+            result = dataclasses.replace(result, ready=False, message=str(exc), attempts=number)
+        delay = max(0, started + retry_seconds - clock()) if number < max_attempts and not result.ready else 0
+        log(json.dumps({"attempt": number, "max_attempts": max_attempts, "ready": result.ready, "message": result.message, "retry_in_seconds": round(delay, 1)}, sort_keys=True))
+        if result.ready:
+            return result
         if delay > 0:
             sleep(delay)
-    return result
+    return dataclasses.replace(result, message=f"Completed {max_attempts} attempts without reaching ready state: {result.message}")
 
 
 def build_user_data() -> str:
@@ -347,12 +345,9 @@ class OciBackend:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--window-seconds", type=int, default=3600)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     args = parser.parse_args()
-    if not 1 <= args.window_seconds <= 3600:
-        parser.error("The retry window must be between 1 and 3600 seconds")
     try:
         cfg = Config.from_environment()
         backend = OciBackend(cfg)
@@ -371,11 +366,11 @@ def main():
 
         if args.once:
             try:
-                result = attempt()
+                result = dataclasses.replace(attempt(), attempts=1)
             except RetryableError as exc:
-                result = Result(False, str(exc))
+                result = Result(False, str(exc), attempts=1)
         else:
-            result = run_retry_loop(attempt, window_seconds=args.window_seconds)
+            result = run_retry_loop(attempt)
         report = dataclasses.asdict(result)
         report["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         report["data_volume_note"] = "Attached block storage; filesystem initialization and mounting are a separate step."

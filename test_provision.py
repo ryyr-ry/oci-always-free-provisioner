@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -190,9 +191,11 @@ class ProvisionTests(unittest.TestCase):
 
 
 class RetryTests(unittest.TestCase):
-    def run_loop(self, attempts, duration=180, operation_seconds=0):
+    def run_loop(self, attempts, max_attempts=60, operation_seconds=0):
         now = [0.0]
         starts = []
+        self.delays = []
+        self.records = []
 
         def attempt():
             starts.append(now[0])
@@ -203,9 +206,11 @@ class RetryTests(unittest.TestCase):
             return value
 
         def sleep(seconds):
+            self.delays.append(seconds)
             now[0] += seconds
 
-        result = run_retry_loop(attempt, window_seconds=duration, clock=lambda: now[0], sleep=sleep, log=lambda _: None)
+        result = run_retry_loop(attempt, max_attempts=max_attempts, clock=lambda: now[0], sleep=sleep, log=lambda value: self.records.append(json.loads(value)))
+        self.elapsed = now[0]
         return result, starts
 
     def test_retries_every_minute_and_stops_immediately_on_success(self):
@@ -218,10 +223,38 @@ class RetryTests(unittest.TestCase):
         self.assertTrue(result.ready)
         self.assertEqual(starts, [0.0, 60.0])
 
-    def test_retry_window_is_bounded(self):
-        result, starts = self.run_loop([RetryableError("capacity")] * 3)
+    def test_attempt_count_is_bounded(self):
+        result, starts = self.run_loop([RetryableError("capacity")] * 3, max_attempts=3)
         self.assertFalse(result.ready)
         self.assertEqual(starts, [0.0, 60.0, 120.0])
+
+    def test_capacity_failures_run_all_sixty_attempts(self):
+        result, starts = self.run_loop([RetryableError("Out of host capacity")] * 60)
+        self.assertFalse(result.ready)
+        self.assertEqual(len(starts), 60)
+        self.assertEqual(result.attempts, 60)
+        self.assertEqual([record["attempt"] for record in self.records], list(range(1, 61)))
+        self.assertTrue(all(record["max_attempts"] == 60 for record in self.records))
+        self.assertIn("60 attempts", result.message)
+
+    def test_slow_calls_do_not_reduce_the_sixty_attempt_budget(self):
+        result, starts = self.run_loop([RetryableError("capacity")] * 60, operation_seconds=75)
+        self.assertEqual(len(starts), 60)
+        self.assertEqual(result.attempts, 60)
+        self.assertGreater(self.elapsed, 3600)
+
+    def test_final_attempt_does_not_sleep_for_another_minute(self):
+        result, starts = self.run_loop([RetryableError("capacity")] * 60)
+        self.assertEqual(len(self.delays), 59)
+        self.assertEqual(self.elapsed, 59 * 60)
+
+    def test_pending_resources_keep_their_identifiers_after_sixty_attempts(self):
+        pending = Result(False, "Waiting for attachment", "instance", "volume")
+        result, starts = self.run_loop([pending] * 60)
+        self.assertEqual(len(starts), 60)
+        self.assertEqual(result.instance_id, "instance")
+        self.assertEqual(result.volume_id, "volume")
+        self.assertEqual(result.attempts, 60)
 
     def test_authentication_or_configuration_errors_are_not_retried(self):
         with self.assertRaises(FatalError):

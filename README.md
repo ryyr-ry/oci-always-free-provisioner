@@ -16,17 +16,28 @@ The 150 GB total includes both volumes. The data volume is attached but is **not
 
 ## Scheduling and retries
 
-`.github/workflows/provision.yml` runs hourly at minute 17 and supports manual dispatch. Each run retries for up to 60 minutes, at intervals of at least 60 seconds measured from the start of the preceding attempt.
+cron-job.org dispatches `.github/workflows/provision.yml` every hour at minute 00 in `Asia/Tokyo`. GitHub's native cron trigger is not used. Manual workflow dispatch is also available. Every run has a fixed budget of **60 provisioning attempts**, at intervals of at least 60 seconds measured from the start of the preceding attempt. Capacity failures consume all 60 attempts unless provisioning succeeds earlier. Slow API responses do not reduce the attempt budget, and there is no elapsed-time cutoff inside the retry loop.
 
-Only one provisioning job can run at a time. A following hourly run waits instead of canceling an active run. GitHub schedules are best-effort and may be delayed; this is not a real-time scheduler. GitHub can also disable scheduled workflows in public repositories after 60 days without repository activity.
+Each progress record includes `attempt`, `max_attempts`, and `retry_in_seconds`. The final result includes the number of completed `attempts`. There is no short-test input in the workflow. The job uses GitHub's six-hour maximum timeout to leave room for slow API responses; normally the 59 intervals take approximately 59 minutes plus request time.
+
+Each external request dispatches a new run without checking for existing runs. There is no workflow concurrency group or application-level dispatch deduplication, so an earlier run does not place a following hourly run into a repository-defined wait queue. GitHub runner availability and platform concurrency limits still apply. OCI resource reconciliation and stable retry tokens remain independent of workflow scheduling.
+
+The trigger path is:
+
+```text
+cron-job.org -> authenticated Cloudflare Worker -> GitHub workflow_dispatch
+```
+
+The Cloudflare Worker only dispatches this repository's `provision.yml` on `main`. It ignores caller-provided refs and repository names. GitHub credentials stay in Cloudflare secrets; cron-job.org receives only the restricted dispatch bearer token. Missing or invalid authorization is rejected, and upstream errors never return credentials or upstream response bodies.
 
 After all resources are ready, the workflow:
 
 1. Saves a `provisioning-result` artifact containing resource identifiers and the public IPv4, but no credentials.
 2. Opens one success issue mentioning the repository owner.
-3. Disables its own provisioning workflow to stop future scheduled attempts.
+3. Disables the specific external cron-job.org job using `scheduler.py`.
+4. Disables its own provisioning workflow.
 
-To start a fresh retry window manually:
+To start another 60-attempt run manually:
 
 ```bash
 gh workflow run provision.yml --repo OWNER/REPOSITORY
@@ -38,7 +49,7 @@ To stop attempts:
 gh workflow disable provision.yml --repo OWNER/REPOSITORY
 ```
 
-Disabling a workflow prevents new runs. To stop an already running job, cancel that run in GitHub Actions or use `gh run cancel RUN_ID`.
+Disabling a workflow prevents new runs, but the external cron job must also be disabled in cron-job.org to stop dispatch requests. To stop an already running job, cancel that run in GitHub Actions or use `gh run cancel RUN_ID`.
 
 ## Idempotency and allocation checks
 
@@ -75,6 +86,8 @@ Required repository secrets:
 | `OCI_AVAILABILITY_DOMAIN` | Home-region availability domain |
 | `OCI_IMAGE_OCID` | Available Ubuntu 24.04 ARM64 platform image |
 | `OCI_SSH_PUBLIC_KEY` | Public recovery key; never provide its private key |
+| `CRONJOB_API_KEY` | cron-job.org management key, used only to disable the successful job |
+| `CRONJOB_JOB_ID` | Identifier of this deployment's external cron job |
 
 Required repository variables:
 
@@ -88,6 +101,30 @@ The subnet, route table, internet gateway, and ingress rules must already exist.
 The automation user has infrastructure read permissions and creation-related operations for Compute, Block Volume, and reserved public IPs. Its policy excludes delete operations and IAM administration. Console passwords and non-API credentials are disabled. Policy templates are in `iam-policy-statements.txt`; replace the group name if necessary.
 
 Pull-request tests receive no OCI secrets and cannot trigger provisioning. Official GitHub actions are pinned to commit hashes, and the OCI SDK is pinned in `requirements.txt`.
+
+## External scheduler and dispatcher
+
+`dispatcher/` contains the Cloudflare Worker and Bun tests. Its Worker name is `oci-a1-provision-dispatch`. The only public endpoint is `POST /dispatch`; the request must contain `Authorization: Bearer <DISPATCH_TOKEN>`.
+
+Cloudflare secret bindings:
+
+- `DISPATCH_TOKEN`: a random token that can only request a dispatch of this workflow.
+- `GITHUB_TOKEN`: a GitHub credential authorized to dispatch this repository's workflow.
+
+The cron-job.org request uses POST with an empty JSON object, the dispatch bearer token header, and a 30-second timeout. Its permanent schedule uses timezone `Asia/Tokyo`, `minutes: [0]`, and `hours`, `mdays`, `months`, and `wdays` all set to `[-1]`, with no expiry. It does not store the GitHub credential.
+
+To build and deploy the Worker with the `cf` CLI:
+
+```bash
+cd dispatcher
+bun install --frozen-lockfile
+bun test
+bun run typecheck
+cf build
+cf deploy --prebuilt --secrets-file /protected/path/dispatcher-secrets.json
+```
+
+The secrets file is a JSON object containing the two binding values and must stay outside version control. Repository secrets, Cloudflare secrets, and cron-job.org request headers are configured separately from the public source.
 
 ## Guest bootstrap
 
@@ -111,6 +148,7 @@ The standard-library tests do not need credentials. The in-memory authentication
 ```bash
 python3 -m unittest discover -v
 systemd-analyze verify resource-guard.service
+bun test dispatcher
 ```
 
 For authenticated verification, install the pinned dependency in a virtual environment and provide the environment variables listed above. `OCI_CONFIG_FILE` can point to a protected local OCI API-key configuration instead of passing the signing key through the environment.
@@ -118,7 +156,7 @@ For authenticated verification, install the pinned dependency in a virtual envir
 ```bash
 python provision.py --preflight-only
 python provision.py --once
-python provision.py --window-seconds 3600
+python provision.py
 ```
 
-`--preflight-only` performs read-only checks. `--once` can create real resources and performs one reconciliation attempt. The default invocation retries for one hour. Results are written to the ignored `output/` directory.
+`--preflight-only` performs read-only checks. `--once` is a local diagnostic command that can create real resources and performs one reconciliation attempt. The GitHub workflow always uses the default invocation, which performs 60 attempts unless provisioning succeeds earlier or a fatal configuration error occurs. Results are written to the ignored `output/` directory.
