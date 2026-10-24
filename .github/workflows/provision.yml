@@ -1,0 +1,85 @@
+name: Provision Always Free A1
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      retry_minutes:
+        description: Retry window in minutes; use 2 for a live smoke test
+        type: choice
+        options:
+          - '60'
+          - '2'
+        default: '60'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-always-free-a1
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Run unit tests
+        run: python -m unittest discover -v
+      - name: Install the pinned OCI SDK
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Retry provisioning once per minute for one hour
+        id: provision
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_COMPARTMENT_OCID: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          OCI_SUBNET_OCID: ${{ secrets.OCI_SUBNET_OCID }}
+          OCI_AVAILABILITY_DOMAIN: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+          OCI_IMAGE_OCID: ${{ secrets.OCI_IMAGE_OCID }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+          OCI_REGION: ${{ vars.OCI_REGION }}
+          OCI_HOME_REGION: ${{ vars.OCI_HOME_REGION }}
+          OCI_INSTANCE_NAME: ubuntu-a1
+          PYTHONUNBUFFERED: '1'
+          RETRY_MINUTES: ${{ inputs.retry_minutes || '60' }}
+        run: python provision.py --window-seconds "$((RETRY_MINUTES * 60))"
+      - name: Save the provisioning result
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: provisioning-result
+          path: output/provisioning-result.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Notify the repository owner
+        if: steps.provision.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state all --search '"Always Free A1 instance is ready" in:title' --json number --jq 'length')
+          if [ "$existing" = 0 ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Always Free A1 instance is ready" \
+              --body "@${GITHUB_REPOSITORY_OWNER} The Ubuntu A1 instance is RUNNING with 2 OCPU, 12 GB RAM, a 50 GB boot volume, a 100 GB attached data volume, and a reserved IPv4. The CPU/memory controller is included in cloud-init; its guest-level health still needs verification. The data volume still needs filesystem initialization and mounting. Cloudflare management access is a separate step. See the provisioning-result artifact: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
+      - name: Stop the schedule after success
+        if: steps.provision.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable provision.yml --repo "$GITHUB_REPOSITORY"

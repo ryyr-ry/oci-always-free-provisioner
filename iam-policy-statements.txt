@@ -1,0 +1,7 @@
+Allow group GitHubA1Provisioners to read instance-family in tenancy
+Allow group GitHubA1Provisioners to read volume-family in tenancy
+Allow group GitHubA1Provisioners to read virtual-network-family in tenancy
+Allow group GitHubA1Provisioners to manage instance-family in tenancy where any {request.operation = 'LaunchInstance', request.operation = 'AttachVolume'}
+Allow group GitHubA1Provisioners to manage volume-family in tenancy where any {request.operation = 'LaunchInstance', request.operation = 'CreateVolume', request.operation = 'AttachVolume'}
+Allow group GitHubA1Provisioners to manage virtual-network-family in tenancy where any {request.operation = 'LaunchInstance', request.operation = 'CreatePublicIp', request.operation = 'UpdatePublicIp'}
+Allow group GitHubA1Provisioners to inspect limits in tenancy
