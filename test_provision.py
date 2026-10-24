@@ -1,6 +1,9 @@
+import importlib.util
+import os
 import unittest
+from unittest.mock import patch
 
-from provision import Config, FatalError, Result, RetryableError, provision_once, run_retry_loop
+from provision import Config, FatalError, OciBackend, Result, RetryableError, provision_once, run_retry_loop
 
 
 def config(**overrides):
@@ -235,6 +238,29 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(values=values):
                 with self.assertRaises(ValueError):
                     config(**values)
+
+
+@unittest.skipUnless(importlib.util.find_spec("oci"), "The OCI SDK is required for this integration test")
+class EnvironmentAuthenticationTests(unittest.TestCase):
+    def test_actions_secrets_construct_all_clients_without_a_key_file(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = private_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+        environment = {
+            "OCI_CONFIG_FILE": "",
+            "OCI_USER_OCID": "ocid1.user.oc1..example",
+            "OCI_FINGERPRINT": ":".join(["00"] * 16),
+            "OCI_PRIVATE_KEY": pem,
+        }
+        cfg = config(tenancy_id="ocid1.tenancy.oc1..example")
+        with patch.dict(os.environ, environment):
+            backend = OciBackend(cfg)
+        self.assertIsNotNone(backend.compute)
+        self.assertIsNotNone(backend.block)
+        self.assertIsNotNone(backend.network)
+        self.assertIsNotNone(backend.limits)
 
 
 if __name__ == "__main__":

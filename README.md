@@ -106,7 +106,7 @@ Guest measurements do not prove Oracle's reclamation criteria are satisfied. Aft
 
 ## Local verification
 
-The standard-library tests do not need credentials or the OCI SDK:
+The standard-library tests do not need credentials. The in-memory authentication integration test uses an ephemeral test key and runs when the OCI SDK is installed; both GitHub workflows install the SDK before testing:
 
 ```bash
 python3 -m unittest discover -v

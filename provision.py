@@ -190,17 +190,13 @@ class OciBackend:
         self.oci = oci
         if os.environ.get("OCI_CONFIG_FILE"):
             auth = oci.config.from_file(os.environ["OCI_CONFIG_FILE"])
-            signer = None
         else:
-            auth = {"region": cfg.region}
-            signer = oci.signer.Signer(
-                tenancy=cfg.tenancy_id, user=os.environ["OCI_USER_OCID"],
-                fingerprint=os.environ["OCI_FINGERPRINT"], private_key_file_location=None,
-                private_key_content=os.environ["OCI_PRIVATE_KEY"],
-            )
+            auth = {
+                "region": cfg.region, "tenancy": cfg.tenancy_id,
+                "user": os.environ["OCI_USER_OCID"], "fingerprint": os.environ["OCI_FINGERPRINT"],
+                "key_content": os.environ["OCI_PRIVATE_KEY"],
+            }
         options = {"retry_strategy": oci.retry.NoneRetryStrategy(), "timeout": (10, 30)}
-        if signer is not None:
-            options["signer"] = signer
         self.compute = oci.core.ComputeClient(auth, **options)
         self.block = oci.core.BlockstorageClient(auth, **options)
         self.network = oci.core.VirtualNetworkClient(auth, **options)
