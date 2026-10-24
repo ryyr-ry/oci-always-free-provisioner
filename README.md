@@ -25,10 +25,10 @@ Each external request dispatches a new run without checking for existing runs. T
 The trigger path is:
 
 ```text
-cron-job.org -> authenticated Cloudflare Worker -> GitHub workflow_dispatch
+cron-job.org -> GitHub workflow_dispatch
 ```
 
-The Cloudflare Worker only dispatches this repository's `provision.yml` on `main`. It ignores caller-provided refs and repository names. GitHub credentials stay in Cloudflare secrets; cron-job.org receives only the restricted dispatch bearer token. Missing or invalid authorization is rejected, and upstream errors never return credentials or upstream response bodies.
+cron-job.org sends an authenticated POST directly to the GitHub API. Its request headers contain a GitHub token authorized to dispatch the workflow, and its JSON body selects `main`. There is no intermediate service.
 
 After all resources are ready, the workflow:
 
@@ -102,29 +102,31 @@ The automation user has infrastructure read permissions and creation-related ope
 
 Pull-request tests receive no OCI secrets and cannot trigger provisioning. Official GitHub actions are pinned to commit hashes, and the OCI SDK is pinned in `requirements.txt`.
 
-## External scheduler and dispatcher
+## External scheduler
 
-`dispatcher/` contains the Cloudflare Worker and Bun tests. Its Worker name is `oci-a1-provision-dispatch`. The only public endpoint is `POST /dispatch`; the request must contain `Authorization: Bearer <DISPATCH_TOKEN>`.
+Configure cron-job.org to POST directly to:
 
-Cloudflare secret bindings:
-
-- `DISPATCH_TOKEN`: a random token that can only request a dispatch of this workflow.
-- `GITHUB_TOKEN`: a GitHub credential authorized to dispatch this repository's workflow.
-
-The cron-job.org request uses POST with an empty JSON object, the dispatch bearer token header, and a 30-second timeout. Its permanent schedule uses timezone `Asia/Tokyo`, `minutes: [0]`, and `hours`, `mdays`, `months`, and `wdays` all set to `[-1]`, with no expiry. It does not store the GitHub credential.
-
-To build and deploy the Worker with the `cf` CLI:
-
-```bash
-cd dispatcher
-bun install --frozen-lockfile
-bun test
-bun run typecheck
-cf build
-cf deploy --prebuilt --secrets-file /protected/path/dispatcher-secrets.json
+```text
+https://api.github.com/repos/OWNER/REPOSITORY/actions/workflows/provision.yml/dispatches
 ```
 
-The secrets file is a JSON object containing the two binding values and must stay outside version control. Repository secrets, Cloudflare secrets, and cron-job.org request headers are configured separately from the public source.
+Request headers:
+
+```text
+Authorization: Bearer <GITHUB_TOKEN>
+Accept: application/vnd.github+json
+Content-Type: application/json
+User-Agent: cron-job.org-oci-a1
+X-GitHub-Api-Version: 2022-11-28
+```
+
+Request body:
+
+```json
+{"ref":"main"}
+```
+
+Use a 30-second request timeout. The permanent schedule uses timezone `Asia/Tokyo`, `minutes: [0]`, and `hours`, `mdays`, `months`, and `wdays` all set to `[-1]`, with no expiry. GitHub returns HTTP 204 when it accepts the dispatch. The real GitHub token is stored in cron-job.org request headers, not in this repository.
 
 ## Guest bootstrap
 
@@ -148,7 +150,6 @@ The standard-library tests do not need credentials. The in-memory authentication
 ```bash
 python3 -m unittest discover -v
 systemd-analyze verify resource-guard.service
-bun test dispatcher
 ```
 
 For authenticated verification, install the pinned dependency in a virtual environment and provide the environment variables listed above. `OCI_CONFIG_FILE` can point to a protected local OCI API-key configuration instead of passing the signing key through the environment.
